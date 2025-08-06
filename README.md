@@ -1,2 +1,2 @@
-# shriajj--roster--app
+# shriajj-roster-app
 index.html
