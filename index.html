@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shriajj Pty Ltd - Staff Roster Management</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // Simple icons for deployment
+        const lucideIcons = {
+            Calendar: () => '📅',
+            Edit2: () => '✏️',
+            Save: () => '💾',
+            Plus: () => '➕',
+            Trash2: () => '🗑️',
+            User: () => '👤',
+            Lock: () => '🔒',
+            LogOut: () => '🚪',
+            Users: () => '👥',
+            Building: () => '🏢',
+            ChevronLeft: () => '◀',
+            ChevronRight: () => '▶',
+            Download: () => '⬇️',
+            Upload: () => '⬆️',
+            Eye: () => '👁️',
+            EyeOff: () => '🙈',
+            Wifi: () => '📶',
+            WifiOff: () => '📵'
+        };
+    </script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // Icons Component
+        const Icon = ({ name, size = 16, className = "" }) => {
+            return React.createElement('span', {
+                className: `inline-block ${className}`,
+                style: { fontSize: `${size}px` }
+            }, lucideIcons[name] ? lucideIcons[name]() : '?');
+        };
+
+        // Real-time Database Configuration
+        const DATABASE_CONFIG = {
+            supabase: {
+                url: 'https://uuorqbugdhfoikylbxdz.supabase.co',
+                key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV1b3JxYnVnZGhmb2lreWxieGR6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQ0MzQ4NDcsImV4cCI6MjA3MDAxMDg0N30.-d7xjLnyFVoVKbruKhVJthHYCFUkkrWlwijDbrKdye4',
+                enabled: true
+            }
+        };
+
+        // Database Service
+        class DatabaseService {
+            constructor() {
+                this.isConnected = false;
+                this.listeners = new Set();
+                this.localCache = JSON.parse(localStorage.getItem('roster-cache') || '{}');
+            }
+
+            async initialize(config) {
+                try {
+                    if (config.supabase?.enabled) {
+                        this.supabaseUrl = config.supabase.url;
+                        this.supabaseKey = config.supabase.key;
+                        
+                        const response = await fetch(`${this.supabaseUrl}/rest/v1/`, {
+                            headers: {
+                                'apikey': this.supabaseKey,
+                                'Authorization': `Bearer ${this.supabaseKey}`
+                            }
+                        });
+                        
+                        if (response.ok || response.status === 404) {
+                            this.isConnected = true;
+                            console.log('✅ Supabase connected successfully!');
+                            return true;
+                        }
+                    }
+                    return false;
+                } catch (error) {
+                    console.error('❌ Database connection failed:', error);
+                    this.isConnected = false;
+                    return false;
+                }
+            }
+
+            async supabaseRequest(method, table, data = null, params = {}) {
+                if (!this.isConnected) throw new Error('Database not connected');
+
+                const url = new URL(`${this.supabaseUrl}/rest/v1/${table}`);
+                Object.entries(params).forEach(([key, value]) => {
+                    url.searchParams.append(key, value);
+                });
+
+                const options = {
+                    method,
+                    headers: {
+                        'apikey': this.supabaseKey,
+                        'Authorization': `Bearer ${this.supabaseKey}`,
+                        'Content-Type': 'application/json',
+                        'Prefer': 'return=representation'
+                    }
+                };
+
+                if (data && (method === 'POST' || method === 'PATCH')) {
+                    options.body = JSON.stringify(data);
+                }
+
+                const response = await fetch(url.toString(), options);
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Supabase ${method} failed (${response.status}): ${errorText}`);
+                }
+                return response.json();
+            }
+
+            async saveRosterData(locationId, weekKey, data) {
+                try {
+                    if (this.isConnected) {
+                        const existing = await this.supabaseRequest('GET', 'rosters', null, {
+                            'location_id': `eq.${locationId}`,
+                            'week_key': `eq.${weekKey}`
+                        });
+
+                        if (existing && existing.length > 0) {
+                            await this.supabaseRequest('PATCH', `rosters?location_id=eq.${locationId}&week_key=eq.${weekKey}`, {
+                                data: data,
+                                updated_at: new Date().toISOString()
+                            });
+                        } else {
+                            await this.supabaseRequest('POST', 'rosters', {
+                                location_id: locationId,
+                                week_key: weekKey,
+                                data: data,
+                                updated_at: new Date().toISOString()
+                            });
+                        }
+                    }
+                    
+                    this.localCache[`${locationId}-${weekKey}`] = data;
+                    localStorage.setItem('roster-cache', JSON.stringify(this.localCache));
+                    this.notifyListeners({ type: 'roster_updated', locationId, weekKey, data });
+                    return true;
+                } catch (error) {
+                    console.error('❌ Failed to save roster data:', error);
+                    this.localCache[`${locationId}-${weekKey}`] = data;
+                    localStorage.setItem('roster-cache', JSON.stringify(this.localCache));
+                    return false;
+                }
+            }
+
+            onDataChange(callback) {
+                this.listeners.add(callback);
+                return () => this.listeners.delete(callback);
+            }
+
+            notifyListeners(change) {
+                this.listeners.forEach(callback => callback(change));
+            }
+
+            getConnectionStatus() {
+                return this.isConnected;
+            }
+        }
+
+        const dbService = new DatabaseService();
+
+        const RosterApp = () => {
+            // 🔧 CONFIGURATION - CHANGE THIS FOR EACH LOCATION
+            const [appConfig] = useState({
+                companyName: "Shriajj Pty Ltd",               // ← CHANGE FOR EACH LOCATION
+                systemTitle: "Staff Roster Management System",
+                locations: ['Caroline Springs', 'Werribee Plaza', 'Point Cook', 'Geelong', 'Woodgrove'], // ← CUSTOMIZE
+                employees: ['Bhanush', 'Girish', 'Aravind', 'Vansh', 'Kashish', 'Sonam', 'Tejal', 'Anshul', 'Matt', 'Aswin'], // ← CUSTOMIZE
+                users: {
+                    admin: 'shriajj2025',      // ← CHANGE PASSWORDS
+                    manager: 'manager123',     // ← CHANGE PASSWORDS  
+                    supervisor: 'super2025'    // ← CHANGE PASSWORDS
+                },
+                developer: "Vrushali Hinge",
+                primaryColor: "#2563eb",
+                locationId: "main",            // ← CHANGE FOR EACH LOCATION: "location1", "location2", etc.
+                timezone: "Australia/Melbourne"
+            });
+
+            const [isLoggedIn, setIsLoggedIn] = useState(false);
+            const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+            const [loginError, setLoginError] = useState('');
+            const [currentUser, setCurrentUser] = useState('');
+            const [activeTab, setActiveTab] = useState('roster');
+            const [editMode, setEditMode] = useState(false);
+            const [currentWeekStart, setCurrentWeekStart] = useState(new Date(2025, 7, 3));
+            const [showPassword, setShowPassword] = useState(false);
+            const [isOnline, setIsOnline] = useState(true);
+            const [syncStatus, setSyncStatus] = useState('synced');
+            
+            const [employees, setEmployees] = useState(appConfig.employees);
+            const [locations, setLocations] = useState(appConfig.locations);
+            const [newEmployee, setNewEmployee] = useState('');
+            const [newLocation, setNewLocation] = useState('');
+            const [publicHolidays, setPublicHolidays] = useState({});
+
+            // Initial roster data
+            const [allRosterData, setAllRosterData] = useState(() => {
+                const initialData = {};
+                const weekKey = 'Aug-3-2025';
+                initialData[weekKey] = {
+                    'Caroline Springs': {
+                        'Sun 3-Aug': [{ employee: 'Bhanush', scheduledStart: '10:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Mon 4-Aug': [{ employee: 'Girish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Tue 5-Aug': [{ employee: 'Bhanush', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Wed 6-Aug': [{ employee: 'Girish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Thu 7-Aug': [
+                            { employee: 'Girish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Aravind', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Fri 8-Aug': [
+                            { employee: 'Girish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Aravind', scheduledStart: '11:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Sat 9-Aug': [{ employee: 'Vansh', scheduledStart: '12:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }]
+                    },
+                    'Werribee Plaza': {
+                        'Sun 3-Aug': [
+                            { employee: 'Kashish', scheduledStart: '10:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '12:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Mon 4-Aug': [{ employee: 'Kashish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Tue 5-Aug': [{ employee: 'Kashish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Wed 6-Aug': [
+                            { employee: 'Kashish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '11:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Thu 7-Aug': [
+                            { employee: 'Sonam', scheduledStart: '09:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '11:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Fri 8-Aug': [
+                            { employee: 'Tejal', scheduledStart: '09:00', scheduledEnd: '16:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Kashish', scheduledStart: '12:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Sat 9-Aug': [
+                            { employee: 'Kashish', scheduledStart: '09:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Sonam', scheduledStart: '12:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ]
+                    },
+                    'Point Cook': {
+                        'Sun 3-Aug': [
+                            { employee: 'Tejal', scheduledStart: '10:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '12:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Mon 4-Aug': [{ employee: 'Sonam', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Tue 5-Aug': [{ employee: 'Tejal', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Wed 6-Aug': [
+                            { employee: 'Sonam', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '11:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Thu 7-Aug': [
+                            { employee: 'Tejal', scheduledStart: '09:00', scheduledEnd: '19:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '11:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Fri 8-Aug': [
+                            { employee: 'Sonam', scheduledStart: '09:00', scheduledEnd: '19:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Kashish', scheduledStart: '12:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Sonam', scheduledStart: '12:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Sat 9-Aug': [{ employee: 'Tejal', scheduledStart: '09:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }]
+                    },
+                    'Geelong': {
+                        'Sun 3-Aug': [{ employee: 'Anshul', scheduledStart: '10:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Mon 4-Aug': [{ employee: 'Matt', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Tue 5-Aug': [{ employee: 'Anshul', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Wed 6-Aug': [{ employee: 'Matt', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Thu 7-Aug': [{ employee: 'Matt', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Fri 8-Aug': [{ employee: 'Anshul', scheduledStart: '09:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Sat 9-Aug': [{ employee: 'Bhanush', scheduledStart: '09:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }]
+                    },
+                    'Woodgrove': {
+                        'Sun 3-Aug': [{ employee: 'Aswin', scheduledStart: '10:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Mon 4-Aug': [{ employee: 'Aswin', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Tue 5-Aug': [
+                            { employee: 'Aswin', scheduledStart: '12:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Bhanush', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Wed 6-Aug': [],
+                        'Thu 7-Aug': [{ employee: 'Anshul', scheduledStart: '09:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Fri 8-Aug': [
+                            { employee: 'Bhanush', scheduledStart: '09:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '11:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Sat 9-Aug': [{ employee: 'Aswin', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }]
+                    }
+                };
+                return initialData;
+            });
+
+            // Helper functions
+            const getCurrentWeekDates = () => {
+                const days = [];
+                const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                
+                for (let i = 0; i < 7; i++) {
+                    const date = new Date(currentWeekStart);
+                    date.setDate(currentWeekStart.getDate() + i);
+                    const dayName = dayNames[date.getDay()];
+                    const day = date.getDate();
+                    const month = monthNames[date.getMonth()];
+                    days.push(`${dayName} ${day}-${month}`);
+                }
+                return days;
+            };
+
+            const getCurrentWeekString = () => {
+                const startDate = new Date(currentWeekStart);
+                const endDate = new Date(currentWeekStart);
+                endDate.setDate(startDate.getDate() + 6);
+                
+                const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                const startStr = `${startDate.getDate()}-${monthNames[startDate.getMonth()]}`;
+                const endStr = `${endDate.getDate()}-${monthNames[endDate.getMonth()]}`;
+                
+                return `${startStr} to ${endStr}`;
+            };
+
+            const getCurrentWeekKey = () => {
+                const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                const month = monthNames[currentWeekStart.getMonth()];
+                const date = currentWeekStart.getDate();
+                const year = currentWeekStart.getFullYear();
+                return `${month}-${date}-${year}`;
+            };
+
+            const days = getCurrentWeekDates();
+            const currentWeek = getCurrentWeekString();
+            const roster = allRosterData[getCurrentWeekKey()] || {};
+
+            // Navigation functions
+            const navigateWeek = (direction) => {
+                setCurrentWeekStart(prev => {
+                    const newDate = new Date(prev);
+                    newDate.setDate(prev.getDate() + (direction * 7));
+                    return newDate;
+                });
+            };
+
+            // Initialize database
+            useEffect(() => {
+                const initializeApp = async () => {
+                    setSyncStatus('syncing');
+                    const connected = await dbService.initialize(DATABASE_CONFIG);
+                    setIsOnline(connected);
+                    setSyncStatus(connected ? 'synced' : 'offline');
+                };
+                initializeApp();
+            }, []);
+
+            // Auto-save roster data
+            useEffect(() => {
+                const saveData = async () => {
+                    const weekKey = getCurrentWeekKey();
+                    const weekData = allRosterData[weekKey];
+                    if (weekData) {
+                        setSyncStatus('syncing');
+                        const success = await dbService.saveRosterData(appConfig.locationId, weekKey, weekData);
+                        setSyncStatus(success ? 'synced' : 'offline');
+                    }
+                };
+                const timeoutId = setTimeout(saveData, 1000);
+                return () => clearTimeout(timeoutId);
+            }, [allRosterData, appConfig.locationId]);
+
+            // Login functions
+            const handleLogin = () => {
+                const { username, password } = loginForm;
+                if (appConfig.users[username] && appConfig.users[username] === password) {
+                    setIsLoggedIn(true);
+                    setCurrentUser(username);
+                    setLoginError('');
+                } else {
+                    setLoginError('Invalid username or password');
+                }
+            };
+
+            const handleLogout = () => {
+                setIsLoggedIn(false);
+                setCurrentUser('');
+                setLoginForm({ username: '', password: '' });
+                setEditMode(false);
+                setActiveTab('roster');
+                setShowPassword(false);
+            };
+
+            // Roster functions
+            const updateShift = (location, day, shiftIndex, field, value) => {
+                const weekKey = getCurrentWeekKey();
+                setAllRosterData(prev => ({
+                    ...prev,
+                    [weekKey]: {
+                        ...prev[weekKey],
+                        [location]: {
+                            ...prev[weekKey]?.[location],
+                            [day]: prev[weekKey]?.[location]?.[day]?.map((shift, index) => 
+                                index === shiftIndex ? { ...shift, [field]: value } : shift
+                            ) || []
+                        }
+                    }
+                }));
+            };
+
+            const addShift = (location, day) => {
+                const weekKey = getCurrentWeekKey();
+                setAllRosterData(prev => ({
+                    ...prev,
+                    [weekKey]: {
+                        ...prev[weekKey],
+                        [location]: {
+                            ...prev[weekKey]?.[location],
+                            [day]: [...(prev[weekKey]?.[location]?.[day] || []), {
+                                employee: '', 
+                                scheduledStart: '09:00', 
+                                scheduledEnd: '17:00',
+                                actualStart: '',
+                                actualEnd: '',
+                                leaveType: '',
+                                leaveHours: 0,
+                                notes: ''
+                            }]
+                        }
+                    }
+                }));
+            };
+
+            const removeShift = (location, day, shiftIndex) => {
+                const weekKey = getCurrentWeekKey();
+                setAllRosterData(prev => ({
+                    ...prev,
+                    [weekKey]: {
+                        ...prev[weekKey],
+                        [location]: {
+                            ...prev[weekKey]?.[location],
+                            [day]: prev[weekKey]?.[location]?.[day]?.filter((_, index) => index !== shiftIndex) || []
+                        }
+                    }
+                }));
+            };
+
+            const togglePublicHoliday = (day) => {
+                setPublicHolidays(prev => ({
+                    ...prev,
+                    [day]: !prev[day]
+                }));
+            };
+
+            // Employee functions
+            const addEmployee = () => {
+                if (newEmployee.trim() && !employees.includes(newEmployee.trim())) {
+                    setEmployees(prev => [...prev, newEmployee.trim()]);
+                    setNewEmployee('');
+                }
+            };
+
+            const deleteEmployee = (employeeName) => {
+                setEmployees(prev => prev.filter(emp => emp !== employeeName));
+            };
+
+            // Location functions
+            const addLocation = () => {
+                if (newLocation.trim() && !locations.includes(newLocation.trim())) {
+                    setLocations(prev => [...prev, newLocation.trim()]);
+                    setNewLocation('');
+                }
+            };
+
+            const deleteLocation = (locationName) => {
+                setLocations(prev => prev.filter(loc => loc !== locationName));
+            };
+
+            // Login screen
+            if (!isLoggedIn) {
+                return React.createElement('div', {
+                    className: "min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4"
+                }, React.createElement('div', {
+                    className: "bg-white rounded-xl shadow-2xl p-8 w-full max-w-md"
+                }, [
+                    React.createElement('div', {
+                        key: 'header',
+                        className: "text-center mb-8"
+                    }, React.createElement('div', {
+                        className: "bg-blue-600 text-white p-4 rounded-lg mb-4"
+                    }, [
+                        React.createElement('h1', {
+                            key: 'title',
+                            className: "text-2xl font-bold"
+                        }, appConfig.companyName),
+                        React.createElement('p', {
+                            key: 'subtitle',
+                            className: "text-blue-100 text-sm"
+                        }, appConfig.systemTitle)
+                    ])),
+                    React.createElement('div', {
+                        key: 'form',
+                        className: "space-y-6"
+                    }, [
+                        React.createElement('div', { key: 'username' }, [
+                            React.createElement('label', {
+                                className: "block text-sm font-medium text-gray-700 mb-2"
+                            }, [
+                                React.createElement(Icon, { name: 'User', className: "mr-2" }),
+                                'Username'
+                            ]),
+                            React.createElement('input', {
+                                type: "text",
+                                value: loginForm.username,
+                                onChange: (e) => setLoginForm(prev => ({ ...prev, username: e.target.value })),
+                                className: "w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500",
+                                placeholder: "Enter your username"
+                            })
+                        ]),
+                        React.createElement('div', { key: 'password' }, [
+                            React.createElement('label', {
+                                className: "block text-sm font-medium text-gray-700 mb-2"
+                            }, [
+                                React.createElement(Icon, { name: 'Lock', className: "mr-2" }),
+                                'Password'
+                            ]),
+                            React.<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shriajj Pty Ltd - Staff Roster Management</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <style>
+        /* Additional custom styles */
+        .shift-cell { min-height: 80px; }
+        .edit-form { min-width: 350px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const { Calendar, Clock, Edit2, Save, Plus, Trash2, User, Lock, LogOut, Users, Building, ChevronLeft, ChevronRight, Download, Upload, Eye, EyeOff, Wifi, WifiOff } = lucide;
+
+        // Real-time Database Configuration - ALREADY CONFIGURED FOR YOU!
+        const DATABASE_CONFIG = {
+            supabase: {
+                url: 'https://uuorqbugdhfoikylbxdz.supabase.co',
+                key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV1b3JxYnVnZGhmb2lreWxieGR6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQ0MzQ4NDcsImV4cCI6MjA3MDAxMDg0N30.-d7xjLnyFVoVKbruKhVJthHYCFUkkrWlwijDbrKdye4',
+                enabled: true
+            }
+        };
+
+        // Enhanced Database Service with Supabase Integration
+        class DatabaseService {
+            constructor() {
+                this.isConnected = false;
+                this.listeners = new Set();
+                this.localCache = JSON.parse(localStorage.getItem('roster-cache') || '{}');
+                this.supabase = null;
+                this.retryCount = 0;
+                this.maxRetries = 3;
+            }
+
+            async initialize(config) {
+                try {
+                    if (config.supabase?.enabled) {
+                        this.supabaseUrl = config.supabase.url;
+                        this.supabaseKey = config.supabase.key;
+                        
+                        const response = await fetch(`${this.supabaseUrl}/rest/v1/`, {
+                            headers: {
+                                'apikey': this.supabaseKey,
+                                'Authorization': `Bearer ${this.supabaseKey}`
+                            }
+                        });
+                        
+                        if (response.ok || response.status === 404) {
+                            this.isConnected = true;
+                            console.log('✅ Supabase connected successfully!');
+                            await this.initializeTables();
+                            return true;
+                        } else {
+                            throw new Error(`Supabase connection failed: ${response.status}`);
+                        }
+                    }
+                    return false;
+                } catch (error) {
+                    console.error('❌ Database connection failed:', error);
+                    this.isConnected = false;
+                    return false;
+                }
+            }
+
+            async initializeTables() {
+                try {
+                    const tables = ['rosters', 'employees', 'locations'];
+                    for (const table of tables) {
+                        try {
+                            await this.supabaseRequest('GET', table, null, { limit: 1 });
+                        } catch (error) {
+                            if (error.message.includes('relation') && error.message.includes('does not exist')) {
+                                console.log(`⚠️ Table '${table}' doesn't exist. Please create it in Supabase dashboard.`);
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.warn('Could not verify tables:', error);
+                }
+            }
+
+            async supabaseRequest(method, table, data = null, params = {}) {
+                if (!this.isConnected) {
+                    throw new Error('Database not connected');
+                }
+
+                const url = new URL(`${this.supabaseUrl}/rest/v1/${table}`);
+                
+                Object.entries(params).forEach(([key, value]) => {
+                    url.searchParams.append(key, value);
+                });
+
+                const options = {
+                    method,
+                    headers: {
+                        'apikey': this.supabaseKey,
+                        'Authorization': `Bearer ${this.supabaseKey}`,
+                        'Content-Type': 'application/json',
+                        'Prefer': 'return=representation'
+                    }
+                };
+
+                if (data && (method === 'POST' || method === 'PATCH')) {
+                    options.body = JSON.stringify(data);
+                }
+
+                const response = await fetch(url.toString(), options);
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Supabase ${method} failed (${response.status}): ${errorText}`);
+                }
+
+                return response.json();
+            }
+
+            async saveRosterData(locationId, weekKey, data) {
+                try {
+                    if (this.isConnected) {
+                        const existing = await this.supabaseRequest('GET', 'rosters', null, {
+                            'location_id': `eq.${locationId}`,
+                            'week_key': `eq.${weekKey}`
+                        });
+
+                        if (existing && existing.length > 0) {
+                            await this.supabaseRequest('PATCH', `rosters?location_id=eq.${locationId}&week_key=eq.${weekKey}`, {
+                                data: data,
+                                updated_at: new Date().toISOString()
+                            });
+                        } else {
+                            await this.supabaseRequest('POST', 'rosters', {
+                                location_id: locationId,
+                                week_key: weekKey,
+                                data: data,
+                                updated_at: new Date().toISOString()
+                            });
+                        }
+                        
+                        console.log('✅ Roster data saved to Supabase');
+                    }
+                    
+                    this.localCache[`${locationId}-${weekKey}`] = data;
+                    localStorage.setItem('roster-cache', JSON.stringify(this.localCache));
+                    this.notifyListeners({ type: 'roster_updated', locationId, weekKey, data });
+                    return true;
+                } catch (error) {
+                    console.error('❌ Failed to save roster data:', error);
+                    this.localCache[`${locationId}-${weekKey}`] = data;
+                    localStorage.setItem('roster-cache', JSON.stringify(this.localCache));
+                    return false;
+                }
+            }
+
+            async getRosterData(locationId, weekKey) {
+                try {
+                    if (this.isConnected) {
+                        const result = await this.supabaseRequest('GET', 'rosters', null, {
+                            'location_id': `eq.${locationId}`,
+                            'week_key': `eq.${weekKey}`
+                        });
+                        
+                        if (result && result.length > 0) {
+                            console.log('✅ Roster data loaded from Supabase');
+                            return result[0].data;
+                        }
+                    }
+                    
+                    const cached = this.localCache[`${locationId}-${weekKey}`];
+                    if (cached) {
+                        console.log('📱 Using cached roster data');
+                    }
+                    return cached || null;
+                } catch (error) {
+                    console.error('❌ Failed to fetch roster data:', error);
+                    return this.localCache[`${locationId}-${weekKey}`] || null;
+                }
+            }
+
+            async saveEmployees(locationId, employees) {
+                try {
+                    if (this.isConnected) {
+                        const existing = await this.supabaseRequest('GET', 'employees', null, {
+                            'location_id': `eq.${locationId}`
+                        });
+
+                        if (existing && existing.length > 0) {
+                            await this.supabaseRequest('PATCH', `employees?location_id=eq.${locationId}`, {
+                                employees: employees,
+                                updated_at: new Date().toISOString()
+                            });
+                        } else {
+                            await this.supabaseRequest('POST', 'employees', {
+                                location_id: locationId,
+                                employees: employees,
+                                updated_at: new Date().toISOString()
+                            });
+                        }
+                        
+                        console.log('✅ Employees saved to Supabase');
+                    }
+                    
+                    this.localCache[`${locationId}-employees`] = employees;
+                    localStorage.setItem('roster-cache', JSON.stringify(this.localCache));
+                    this.notifyListeners({ type: 'employees_updated', locationId, employees });
+                    return true;
+                } catch (error) {
+                    console.error('❌ Failed to save employees:', error);
+                    this.localCache[`${locationId}-employees`] = employees;
+                    localStorage.setItem('roster-cache', JSON.stringify(this.localCache));
+                    return false;
+                }
+            }
+
+            async getEmployees(locationId) {
+                try {
+                    if (this.isConnected) {
+                        const result = await this.supabaseRequest('GET', 'employees', null, {
+                            'location_id': `eq.${locationId}`
+                        });
+                        
+                        if (result && result.length > 0) {
+                            console.log('✅ Employees loaded from Supabase');
+                            return result[0].employees;
+                        }
+                    }
+                    
+                    const cached = this.localCache[`${locationId}-employees`];
+                    if (cached) {
+                        console.log('📱 Using cached employees');
+                    }
+                    return cached || null;
+                } catch (error) {
+                    console.error('❌ Failed to fetch employees:', error);
+                    return this.localCache[`${locationId}-employees`] || null;
+                }
+            }
+
+            async saveLocations(locationId, locations) {
+                try {
+                    if (this.isConnected) {
+                        const existing = await this.supabaseRequest('GET', 'locations', null, {
+                            'location_id': `eq.${locationId}`
+                        });
+
+                        if (existing && existing.length > 0) {
+                            await this.supabaseRequest('PATCH', `locations?location_id=eq.${locationId}`, {
+                                locations: locations,
+                                updated_at: new Date().toISOString()
+                            });
+                        } else {
+                            await this.supabaseRequest('POST', 'locations', {
+                                location_id: locationId,
+                                locations: locations,
+                                updated_at: new Date().toISOString()
+                            });
+                        }
+                        
+                        console.log('✅ Locations saved to Supabase');
+                    }
+                    
+                    this.localCache[`${locationId}-locations`] = locations;
+                    localStorage.setItem('roster-cache', JSON.stringify(this.localCache));
+                    this.notifyListeners({ type: 'locations_updated', locationId, locations });
+                    return true;
+                } catch (error) {
+                    console.error('❌ Failed to save locations:', error);
+                    this.localCache[`${locationId}-locations`] = locations;
+                    localStorage.setItem('roster-cache', JSON.stringify(this.localCache));
+                    return false;
+                }
+            }
+
+            async getLocations(locationId) {
+                try {
+                    if (this.isConnected) {
+                        const result = await this.supabaseRequest('GET', 'locations', null, {
+                            'location_id': `eq.${locationId}`
+                        });
+                        
+                        if (result && result.length > 0) {
+                            console.log('✅ Locations loaded from Supabase');
+                            return result[0].locations;
+                        }
+                    }
+                    
+                    const cached = this.localCache[`${locationId}-locations`];
+                    if (cached) {
+                        console.log('📱 Using cached locations');
+                    }
+                    return cached || null;
+                } catch (error) {
+                    console.error('❌ Failed to fetch locations:', error);
+                    return this.localCache[`${locationId}-locations`] || null;
+                }
+            }
+
+            onDataChange(callback) {
+                this.listeners.add(callback);
+                return () => this.listeners.delete(callback);
+            }
+
+            notifyListeners(change) {
+                this.listeners.forEach(callback => callback(change));
+            }
+
+            getConnectionStatus() {
+                return this.isConnected;
+            }
+        }
+
+        // Initialize database service
+        const dbService = new DatabaseService();
+
+        const RosterApp = () => {
+            // Configuration - CHANGE THIS FOR EACH LOCATION
+            const [appConfig, setAppConfig] = useState(() => {
+                return {
+                    companyName: "Shriajj Pty Ltd", // ← CHANGE FOR EACH LOCATION
+                    systemTitle: "Staff Roster Management System",
+                    locations: ['Caroline Springs', 'Werribee Plaza', 'Point Cook', 'Geelong', 'Woodgrove'], // ← CUSTOMIZE
+                    employees: ['Bhanush', 'Girish', 'Aravind', 'Vansh', 'Kashish', 'Sonam', 'Tejal', 'Anshul', 'Matt', 'Aswin'], // ← CUSTOMIZE
+                    users: {
+                        admin: 'shriajj2025',      // ← CHANGE PASSWORDS
+                        manager: 'manager123',     // ← CHANGE PASSWORDS
+                        supervisor: 'super2025'    // ← CHANGE PASSWORDS
+                    },
+                    developer: "Vrushali Hinge",
+                    primaryColor: "#2563eb",
+                    locationId: "main",            // ← CHANGE FOR EACH LOCATION: "location1", "location2", etc.
+                    timezone: "Australia/Melbourne"
+                };
+            });
+
+            const [isLoggedIn, setIsLoggedIn] = useState(false);
+            const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+            const [loginError, setLoginError] = useState('');
+            const [currentUser, setCurrentUser] = useState('');
+            const [activeTab, setActiveTab] = useState('roster');
+            const [editMode, setEditMode] = useState(false);
+            const [currentWeekStart, setCurrentWeekStart] = useState(new Date(2025, 7, 3));
+            const [showPassword, setShowPassword] = useState(false);
+            const [rememberPassword, setRememberPassword] = useState(false);
+            const [isOnline, setIsOnline] = useState(true);
+            const [syncStatus, setSyncStatus] = useState('synced');
+            
+            const validUsers = appConfig.users;
+            const [employees, setEmployees] = useState(appConfig.employees);
+            const [locations, setLocations] = useState(appConfig.locations);
+            const [newEmployee, setNewEmployee] = useState('');
+            const [newLocation, setNewLocation] = useState('');
+            const [publicHolidays, setPublicHolidays] = useState({});
+
+            // Your complete roster data here...
+            const [allRosterData, setAllRosterData] = useState(() => {
+                const initialData = {};
+                const weekKey = 'Aug-3-2025';
+                initialData[weekKey] = {
+                    'Caroline Springs': {
+                        'Sun 3-Aug': [{ employee: 'Bhanush', scheduledStart: '10:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Mon 4-Aug': [{ employee: 'Girish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Tue 5-Aug': [{ employee: 'Bhanush', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Wed 6-Aug': [{ employee: 'Girish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Thu 7-Aug': [
+                            { employee: 'Girish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Aravind', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Fri 8-Aug': [
+                            { employee: 'Girish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Aravind', scheduledStart: '11:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Sat 9-Aug': [{ employee: 'Vansh', scheduledStart: '12:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }]
+                    },
+                    'Werribee Plaza': {
+                        'Sun 3-Aug': [
+                            { employee: 'Kashish', scheduledStart: '10:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '12:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Mon 4-Aug': [{ employee: 'Kashish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Tue 5-Aug': [{ employee: 'Kashish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }],
+                        'Wed 6-Aug': [
+                            { employee: 'Kashish', scheduledStart: '09:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '11:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Thu 7-Aug': [
+                            { employee: 'Sonam', scheduledStart: '09:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Vansh', scheduledStart: '11:00', scheduledEnd: '17:30', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Fri 8-Aug': [
+                            { employee: 'Tejal', scheduledStart: '09:00', scheduledEnd: '16:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Kashish', scheduledStart: '12:00', scheduledEnd: '20:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ],
+                        'Sat 9-Aug': [
+                            { employee: 'Kashish', scheduledStart: '09:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' },
+                            { employee: 'Sonam', scheduledStart: '12:00', scheduledEnd: '17:00', actualStart: '', actualEnd: '', leaveType: '', leaveHours: 0, notes: '' }
+                        ]
+                    }
+                    // Additional location data would go here...
+                };
+                return initialData;
+            });
+
+            // All your functions and logic here...
+            const getCurrentWeekDates = () => {
+                const days = [];
+                const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                
+                for (let i = 0; i < 7; i++) {
+                    const date = new Date(currentWeekStart);
+                    date.setDate(currentWeekStart.getDate() + i);
+                    const dayName = dayNames[date.getDay()];
+                    const day = date.getDate();
+                    const month = monthNames[date.getMonth()];
+                    days.push(`${dayName} ${day}-${month}`);
+                }
+                return days;
+            };
+
+            const getCurrentWeekString = () => {
+                const startDate = new Date(currentWeekStart);
+                const endDate = new Date(currentWeekStart);
+                endDate.setDate(startDate.getDate() + 6);
+                
+                const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                const startStr = `${startDate.getDate()}-${monthNames[startDate.getMonth()]}`;
+                const endStr = `${endDate.getDate()}-${monthNames[endDate.getMonth()]}`;
+                
+                return `${startStr} to ${endStr}`;
+            };
+
+            const days = getCurrentWeekDates();
+            const currentWeek = getCurrentWeekString();
+
+            const getCurrentWeekKey = () => {
+                const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                const month = monthNames[currentWeekStart.getMonth()];
+                const date = currentWeekStart.getDate();
+                const year = currentWeekStart.getFullYear();
+                return `${month}-${date}-${year}`;
+            };
+
+            const roster = allRosterData[getCurrentWeekKey()] || {};
+
+            // Initialize database and load data
+            useEffect(() => {
+                const initializeApp = async () => {
+                    setSyncStatus('syncing');
+                    const connected = await dbService.initialize(DATABASE_CONFIG);
+                    setIsOnline(connected);
+                    setSyncStatus(connected ? 'synced' : 'offline');
+                };
+                initializeApp();
+            }, []);
+
+            const handleLogin = () => {
+                const { username, password } = loginForm;
+                
+                if (validUsers[username] && validUsers[username] === password) {
+                    setIsLoggedIn(true);
+                    setCurrentUser(username);
+                    setLoginError('');
+                } else {
+                    setLoginError('Invalid username or password');
+                }
+            };
+
+            const handleLogout = () => {
+                setIsLoggedIn(false);
+                setCurrentUser('');
+                setLoginForm({ username: '', password: '' });
+                setEditMode(false);
+                setActiveTab('roster');
+                setShowPassword(false);
+                setRememberPassword(false);
+            };
+
+            if (!isLoggedIn) {
+                return React.createElement('div', {
+                    className: "min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4"
+                }, [
+                    React.createElement('div', {
+                        key: 'login-form',
+                        className: "bg-white rounded-xl shadow-2xl p-8 w-full max-w-md"
+                    }, [
+                        React.createElement('div', {
+                            key: 'header',
+                            className: "text-center mb-8"
+                        }, [
+                            React.createElement('div', {
+                                key: 'branding',
+                                className: "bg-blue-600 text-white p-4 rounded-lg mb-4"
+                            }, [
+                                React.createElement('h1', {
+                                    key: 'title',
+                                    className: "text-2xl font-bold"
+                                }, appConfig.companyName),
+                                React.createElement('p', {
+                                    key: 'subtitle',
+                                    className: "text-blue-100 text-sm"
+                                }, appConfig.systemTitle)
+                            ])
+                        ]),
+                        React.createElement('div', {
+                            key: 'form',
+                            className: "space-y-6"
+                        }, [
+                            React.createElement('div', { key: 'username' }, [
+                                React.createElement('label', {
+                                    className: "block text-sm font-medium text-gray-700 mb-2"
+                                }, "Username"),
+                                React.createElement('input', {
+                                    type: "text",
+                                    value: loginForm.username,
+                                    onChange: (e) => setLoginForm(prev => ({ ...prev, username: e.target.value })),
+                                    className: "w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500",
+                                    placeholder: "Enter your username"
+                                })
+                            ]),
+                            React.createElement('div', { key: 'password' }, [
+                                React.createElement('label', {
+                                    className: "block text-sm font-medium text-gray-700 mb-2"
+                                }, "Password"),
+                                React.createElement('input', {
+                                    type: showPassword ? "text" : "password",
+                                    value: loginForm.password,
+                                    onChange: (e) => setLoginForm(prev => ({ ...prev, password: e.target.value })),
+                                    className: "w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500",
+                                    placeholder: "Enter your password"
+                                })
+                            ]),
+                            loginError && React.createElement('div', {
+                                key: 'error',
+                                className: "bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg"
+                            }, loginError),
+                            React.createElement('button', {
+                                key: 'login-btn',
+                                onClick: handleLogin,
+                                className: "w-full bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                            }, "Sign In")
+                        ]),
+                        React.createElement('div', {
+                            key: 'footer',
+                            className: "mt-8 pt-6 border-t border-gray-200 text-center text-xs text-gray-500"
+                        }, [
+                            React.createElement('p', { key: 'copyright' }, `© 2025 ${appConfig.companyName}. All rights reserved.`),
+                            React.createElement('p', {
+                                key: 'developer',
+                                className: "mt-1"
+                            }, `App designed and crafted by ${appConfig.developer}`)
+                        ])
+                    ])
+                ]);
+            }
+
+            return React.createElement('div', {
+                className: "max-w-7xl mx-auto p-6 bg-gray-50 min-h-screen"
+            }, [
+                // Header
+                React.createElement('div', {
+                    key: 'header',
+                    className: "bg-white rounded-lg shadow-md p-6 mb-6"
+                }, [
+                    React.createElement('div', {
+                        key: 'header-content',
+                        className: "flex items-center justify-between"
+                    }, [
+                        React.createElement('div', {
+                            key: 'title-section',
+                            className: "flex items-center gap-3"
+                        }, [
+                            React.createElement('div', {
+                                key: 'icon',
+                                className: "bg-blue-600 text-white p-2 rounded-lg"
+                            }, React.createElement(Calendar, { size: 24 })),
+                            React.createElement('div', { key: 'title-text' }, [
+                                React.createElement('h1', {
+                                    key: 'main-title',
+                                    className: "text-2xl font-bold text-gray-800"
+                                }, `${appConfig.companyName} - Roster Management`),
+                                React.createElement('div', {
+                                    key: 'week-nav',
+                                    className: "flex items-center gap-4"
+                                }, [
+                                    React.createElement('span', {
+                                        key: 'week-text',
+                                        className: "text-lg text-gray-600"
+                                    }, currentWeek),
+                                    React.createElement('div', {
+                                        key: 'nav-buttons',
+                                        className: "flex items-center gap-2"
+                                    }, [
+                                        React.createElement('button', {
+                                            key: 'prev',
+                                            onClick: () => {
+                                                setCurrentWeekStart(prev => {
+                                                    const newDate = new Date(prev);
+                                                    newDate.setDate(prev.getDate() - 7);
+                                                    return newDate;
+                                                });
+                                            },
+                                            className: "p-1 rounded hover:bg-gray-200 text-gray-600",
+                                            title: "Previous Week"
+                                        }, React.createElement(ChevronLeft, { size: 20 })),
+                                        React.createElement('button', {
